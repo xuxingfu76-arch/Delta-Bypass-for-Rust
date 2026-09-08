@@ -2,22 +2,22 @@
 
 English · [简体中文](README.md)
 
-A high-performance automated verification bypass service for Platoboost written in Rust. Automatically solves CAPTCHA image challenges and processes verification checkpoints to extract access keys, providing both a Command Line Interface (CLI) and an HTTP REST API.
+A high-performance automated verification bypass service for Platoboost written in Rust. Automatically processes sequential checkpoints to extract access keys, providing both a Command Line Interface (CLI) and an HTTP REST API.
 
 ---
 
 ## Overview
 
-Delta Bypass for Rust automates the entire Platoboost verification workflow. Given a target authorization URL or credential string, the service automatically solves image CAPTCHAs, navigates sequential checkpoints, and retrieves the final access key.
+Delta Bypass for Rust automates the entire Platoboost verification workflow. Given a target authorization URL or credential string, the service automatically navigates sequential checkpoints and retrieves the final access key.
 
-Developed by **Hasl_Team**, this project is a high-performance Rust rewrite of Hasl_Team's original Python implementation ([Delta-bypass Source Repository](https://github.com/AbabaHnb/Delta-bypass)). While maintaining **100% pixel-perfect accuracy alignment** with the original solving algorithms, it significantly improves execution speed and concurrent throughput.
+Developed by **Hasl_Team**, this project is a high-performance Rust rewrite of Hasl_Team's original Python implementation ([Delta-bypass Source Repository](https://github.com/AbabaHnb/Delta-bypass)), significantly improving execution speed and concurrent throughput.
 
 ## System Requirements & Prerequisites
 
 * **Zero Language Runtimes Required**: No Python, Node.js, .NET, or interpreter installation required.
 * **No External Shared Library Dependencies**: OpenSSL is not required (cryptography routines are written in pure Rust and statically linked).
 * **Network & Storage Requirements**:
-  * Internet access is required to reach `captcha.platorelay.com` and `auth.platorelay.com`.
+  * Internet access is required to reach `auth.platorelay.com`.
   * The working directory must be **writable**. The service automatically creates and maintains `.key_cache.json` (deleting this file is safe; it automatically rebuilds).
 
 ---
@@ -39,7 +39,7 @@ The output binary is placed at `target/release/delta-bypass` (`delta-bypass.exe`
 
 The project includes an automated GitHub Actions CI/CD workflow ([.github/workflows/build.yml](file:///.github/workflows/build.yml)).
 - **On Push / PR**: Binaries are automatically built for Windows (x64), Linux (GNU), and Linux (Musl static). Artifacts can be downloaded directly from the **Actions** tab on GitHub.
-- **On Version Tag Push**: Pushing a version tag (e.g., `git tag v1.0.0 && git push origin v1.0.0`) automatically publishes a GitHub Release with pre-compiled binaries attached.
+- **On Version Tag Push**: Pushing a version tag (e.g., `git tag v1.2.0 && git push origin v1.2.0`) automatically publishes a GitHub Release with pre-compiled binaries attached.
 
 ### Linux C Toolchain Prerequisites
 
@@ -77,9 +77,6 @@ Measured on an 8-core CPU system running Debian Linux:
 | Benchmark Metric | Python Original | Rust Rewrite | Improvement / Comparison |
 |---|---|---|---|
 | End-to-End Single Bypass | ~6.8 seconds | **~5.5 seconds** | ~20% overall speedup |
-| `coherence` CAPTCHA Solving | 72 ms | **28 ms** | 2.57x computation speedup |
-| `driftodd` CAPTCHA Solving | 227 ms | **38 ms** | 5.97x computation speedup |
-| Algorithmic Accuracy | Baseline | **24/24 Identical** | Max coordinate offset: 0.000 px |
 
 > **Note**: Out of the ~5.5-second total elapsed time, approximately 5.0 seconds consist of mandatory upstream checkpoint cooldown intervals (enforced server delays). Local CPU processing and algorithms take only ~0.5 seconds.
 
@@ -127,11 +124,6 @@ Legacy Windows Command Prompt (`cmd.exe`) defaults to non-UTF-8 encodings, which
 | `--serve` | Off | Run in HTTP API server mode |
 | `--host` | 0.0.0.0 | Server listen address (use `127.0.0.1` for local access only) |
 | `--port` / `-p` | 2233 | Server listen port |
-| `--prepared N` | 30 | Puzzle store pre-fill capacity (set to 0 to disable) |
-| `--img <FILE> --img-type <KIND>` | — | Debug: test local image solving (KIND: `driftodd` or `coherence`) |
-| `--bench N` | 1 | Debug: repeatedly evaluate a single image N times for benchmarking |
-| `--pool-stats` | Off | Debug: display real-time puzzle store statistics only |
-| `--pool-watch-secs N` | 60 | Debug: duration in seconds to monitor the puzzle store |
 
 ---
 
@@ -140,7 +132,7 @@ Legacy Windows Command Prompt (`cmd.exe`) defaults to non-UTF-8 encodings, which
 ### Starting the Server
 
 ```bash
-delta-bypass --serve --port 2233 --prepared 30
+delta-bypass --serve --port 2233
 ```
 
 ### Request Example
@@ -186,51 +178,16 @@ curl -G http://127.0.0.1:2233/delta \
 
 ## Performance Optimizations
 
-The application incorporates three key architectural optimizations to minimize latency:
+The application incorporates two key architectural optimizations to minimize latency:
 
-1. **Pre-solved CAPTCHA Store (saves ~1.1s)**  
-   Empirical testing confirmed that the upstream CAPTCHA service is shared globally and independent of specific link sessions. The service asynchronously fetches CAPTCHAs, downloads 45KB images, and calculates answers in the background to build a credential store. When a client request arrives, only a single ~180ms credential exchange is performed. Credentials strictly adhere to one-time usage and are **never reused or cached long-term**.
+1. **Send-Time Cooldown Tracking (saves ~0.2s)**  
+   Upstream evaluates the 5-second checkpoint cooldown based on server request arrival timestamps. Tracking is calculated from client **request dispatch** rather than response receipt, saving one full Network Round-Trip Time (RTT). An adaptive self-tuning margin absorbs network jitter while preventing rate limits.
 
-2. **Send-Time Cooldown Tracking (saves ~0.2s)**  
-   Upstream evaluates the 5-second checkpoint cooldown based on server request arrival timestamps. Tracking is calculated from client **request dispatch** rather than response receipt, saving one full Network Round-Trip Time (RTT). An adaptive self-tuning margin (60ms to 1500ms) absorbs network jitter while preventing rate limits.
+2. **HTTP Connection Pooling (saves ~0.6s)**  
+   Persistent TCP/TLS connections are maintained with the upstream server, avoiding repeated handshake costs.
 
-3. **HTTP Connection Pooling (saves ~0.6s)**  
-   Persistent TCP/TLS connections are maintained with upstream servers. Fetching a 45KB image over an established connection requires ~25ms compared to ~660ms for new TLS handshakes.
-
----
-
-## Puzzle Store & Rate Limiting Mechanics
-
-The puzzle store is bound by **request rate constraints** rather than server memory capacity.
-
-Maintaining 30 ready puzzles with a 30-second TTL mathematically requires a replenishment rate of **1 puzzle per second** (equivalent to 2 HTTP requests per second continuously).
-
-To prevent upstream rate limiting, strict concurrency controls are enforced:
-* **Global Single Ticket Window**: All background threads queue sequentially for token acquisition.
-* **In-Flight Concurrency Limit**: Maximum of 2 CAPTCHAs being solved concurrently worldwide.
-* **Global Circuit Breaker**: Any single rate limit or refusal pauses all replenishment threads (starting at 5s, exponentially backing off to 60s, halving upon success).
-
-Under typical operation, the store maintains a stable 30/30 level with zero rate limits, cold-starting in ~30 seconds while continuing to serve inbound API requests.
-
-> **Tuning Guidance**: To expand capacity, increase `POOL_MAX_AGE` in `src/config.rs` (server TTL supports up to 60s). Avoid increasing target capacity alone, as the rate limiter will clamp replenishment speed below target levels.
-
----
-
-## Algorithm Accuracy Alignment
-
-The Rust implementation guarantees pixel-level equivalence with the original Python solvers. To preserve precision, three critical implementation details are strictly maintained:
-
-1. **Exact Floating-Point Division for Grayscale**  
-   Grayscale calculation must explicitly divide by `3.0` rather than multiplying by `(1.0 / 3.0)`. For RGB `(170, 170, 170)`, exact division yields `170.0`, whereas `510 * (1/3)` produces `169.99998`. Because the threshold for dark pixel classification is set at exactly `170`, floating-point variance flips pixel binary states, altering connected components and centroid locations.
-
-2. **Full GIF Canvas Compositing**  
-   To optimize bandwidth, GIF frames frequently store only delta rectangular regions. The decoder maintains a full-frame canvas and compositing rules (handling transparency and disposal modes). Reading partial frame patches directly results in corrupted black frames following the first frame.
-
-3. **Deterministic Tie-Breaking Strategy**  
-   Rust's native `max_by` returns the last occurrence on equal values, whereas Python returns the first. To prevent coordinate drift on ties, custom `pick_max` and `pick_min` functions are explicitly implemented.
-
-4. **Integer Grid Division**  
-   All grid dimension calculations utilize integer division to match Python NumPy's `//` operator behavior.
+3. **Same-Link Request Merging**  
+   Concurrent requests for one link trigger only a single real bypass; the rest share the same result.
 
 ---
 
@@ -242,7 +199,7 @@ The Rust implementation guarantees pixel-level equivalence with the original Pyt
 1. Open Task Scheduler and select "Create Task".
 2. **General**: Select "Run whether user is logged on or not" and "Run with highest privileges".
 3. **Triggers**: Add a new trigger set to "At startup".
-4. **Actions**: Add a new action. Program: absolute path to `delta-bypass.exe`. Arguments: `--serve --host 127.0.0.1 --port 2233 --prepared 30`. **Set "Start in" to the directory containing the executable** (omitting this causes working directory redirection to `C:\Windows\System32`).
+4. **Actions**: Add a new action. Program: absolute path to `delta-bypass.exe`. Arguments: `--serve --host 127.0.0.1 --port 2233`. **Set "Start in" to the directory containing the executable** (omitting this causes working directory redirection to `C:\Windows\System32`).
 5. **Settings**: Check "If the task fails, restart every...".
 
 #### Option B: NSSM Service Manager (Recommended with Auto-Restart & Logs)
@@ -250,7 +207,7 @@ Download NSSM from [nssm.cc](https://nssm.cc), then execute in an Administrator 
 
 ```cmd
 nssm install DeltaBypass C:\delta-bypass\delta-bypass.exe
-nssm set DeltaBypass AppParameters "--serve --host 127.0.0.1 --port 2233 --prepared 30"
+nssm set DeltaBypass AppParameters "--serve --host 127.0.0.1 --port 2233"
 nssm set DeltaBypass AppDirectory C:\delta-bypass
 nssm set DeltaBypass AppStdout C:\delta-bypass\out.log
 nssm set DeltaBypass AppStderr C:\delta-bypass\err.log
@@ -303,7 +260,7 @@ COPY --from=builder /build/target/release/delta-bypass /app/
 RUN chown -R app:app /app
 USER app
 EXPOSE 2233
-CMD ["/app/delta-bypass", "--serve", "--host", "0.0.0.0", "--port", "2233", "--prepared", "30"]
+CMD ["/app/delta-bypass", "--serve", "--host", "0.0.0.0", "--port", "2233"]
 ```
 
 #### Build & Run Commands
@@ -343,69 +300,55 @@ location /delta {
 
 ---
 
-## Directory Structure
+## Project Structure
 
 ```
 src/
-├── main.rs              CLI entry point, argument parsing, and command execution
-├── lib.rs               Library entry point and module declarations
-├── config.rs            Global system configuration parameters and constants
-├── api.rs               HTTP REST API server, key caching, and request deduplication
-├── chain.rs             Core bypass workflow (puzzle -> submit -> checkpoint -> key)
-├── pool.rs              Asynchronous puzzle store and replenishment queue
-├── auth.rs              Authentication server communication protocols
-├── crypto.rs            Upstream custom encryption routines
-├── net.rs               HTTP connection pooling and socket reuse
-├── useragent.rs         User-Agent spoofing and mobile browser fingerprinting
-├── link.rs              Test URL generator
-├── timing.rs            High-precision benchmark and step diagnostics logger
-├── image/               Image processing algorithms
-│   ├── mod.rs           GIF decoding, grayscale conversion, and circle fitting
-│   ├── patches.rs       Dark pixel connected component segmentation
-│   └── nearest.rs       Fast nearest-neighbor search algorithms
-└── solver/              CAPTCHA solvers
-    ├── mod.rs           Solver dispatch interface
-    ├── driftodd.rs      Reverse rotation CAPTCHA solver
-    ├── coherence.rs     Static patch / coherence CAPTCHA solver
-    └── tracking.rs      Motion trajectory tracking algorithm
+├── main.rs         Command line entry point (CLI parsing and task dispatch)
+├── lib.rs          Library entry point (module exports)
+├── config.rs       Global configuration constants
+├── api.rs          HTTP API service, key cache, and request merging
+├── chain.rs        Main bypass flow (submit -> checkpoint progression -> key extraction)
+├── auth.rs         Upstream auth server protocol implementation
+├── crypto.rs       Upstream custom encryption implementation
+├── net.rs          HTTP connection management
+├── useragent.rs    User-Agent spoofing and mobile browser fingerprint generation
+├── link.rs         Test link generator
+└── timing.rs       High-resolution timing and performance tracing
 ```
 
 ---
 
-## Configuration Parameters
+## Core Configuration Parameters
 
-All tunable constants are declared in `src/config.rs`. Key options include:
+All parameters are defined in `src/config.rs`:
 
-| Parameter | Default | Notes & Constraints |
+| Constant | Default | Notes & Constraints |
 |---|---|---|
-| `MIN_STEP_GAP` | 5s | Upstream hard cooldown interval; **do not lower** |
-| `GAP_MARGIN_START` | 250ms | Initial delay margin for adaptive tuning |
-| `POOL_MAX_AGE` | 30s | Puzzle store TTL (must remain below server's 60s limit) |
-| `POOL_MIN_SLOT_INTERVAL` | 950ms | Minimum replenishment slot interval; **do not lower** |
-| `POOL_MAX_INFLIGHT` | 2 | Maximum concurrent puzzles in flight; higher values risk rate limits |
+| `MIN_STEP_GAP` | 5 s | Mandatory upstream checkpoint cooldown, **do not lower** |
+| `GAP_MARGIN_START` | 250 ms | Initial adaptive delay margin |
 | `POLL_MAX_ATTEMPTS` | 10 | Maximum key polling attempts |
-| `MAX_ROUNDS_HARD_CAP` | 12 | Maximum round ceiling to prevent infinite loops |
+| `MAX_ROUNDS_HARD_CAP` | 12 | Hard cap on checkpoint rounds (prevents infinite loops) |
 
 ---
 
-## Troubleshooting Guide
+## Troubleshooting
 
-| Symptom | Root Cause | Solution |
+| Symptom | Root Cause | Resolution |
 |---|---|---|
-| `链接无效 / Invalid link` | Expired credential or upstream rejection | Generate a new Platoboost link (upstream rejection behavior) |
-| `绕过失败 / Bypass failed` | Workflow failed at a specific stage | Remove `--quiet` and check the `终止于:` line in logs |
-| Frequent rate limiting logs | Cooldown interval too short | Verify `MIN_STEP_GAP` setting; increase interval if upstream rules tightened |
-| Puzzle store will not replenish | Rate limited by upstream | Run `--pool-stats`; non-zero values in `被拒` indicate rate limits |
-| High-concurrency connection failures | File descriptor limits (Linux) | Run `ulimit -n 65535` or add `LimitNOFILE=65535` in Systemd unit |
-| Windows CMD Chinese garbled | Terminal encoding is not UTF-8 | Run `chcp 65001` or switch to Windows Terminal / PowerShell 7 |
-| Linux `GLIBC_2.xx not found` | Build GLIBC version higher than target system | Build static target `x86_64-unknown-linux-musl` |
-| Linux `Permission denied` | Binary lacks execution permissions | Run `chmod +x delta-bypass` |
-| Key cache file missing | Working directory misconfigured | Check "Start in" in Task Scheduler or `WorkingDirectory` in Systemd |
-| Docker TLS Certificate Error | Missing root certificates | Install `ca-certificates` in runtime container stage |
-| Port binding conflict | Target port bound by another process | Change `--port` or identify and terminate conflicting process |
+| `链接无效 / Invalid link` | Credential expired or rejected upstream | Use a new Platoboost link (upstream rejection) |
+| `绕过失败 / Bypass failed` | A step in the flow did not succeed | Remove `--quiet` and check `终止于:` at the end of the log |
+| Frequent "rate limit" logs | Checkpoint cooldown too short | Check `MIN_STEP_GAP`; raise if upstream tightens controls |
+| Connection failures under high concurrency | System file descriptor limit | Run `ulimit -n 65535` or set `LimitNOFILE=65535` in Systemd |
+| Windows CMD garbled Chinese output | Terminal not UTF-8 | Run `chcp 65001` or use Windows Terminal / PowerShell 7 |
+| `GLIBC_2.xx not found` | Binary built against newer glibc | Build static musl target (`x86_64-unknown-linux-musl`) |
+| `Permission denied` | Binary lacks executable bit | Run `chmod +x delta-bypass` |
+| `.key_cache.json` not found | Working directory not the binary location | Check "Start in" (Task Scheduler) or `WorkingDirectory` (Systemd) |
+| Certificate errors inside Docker | Missing CA root certificates | Install `ca-certificates` in the runtime stage |
+| Port already in use | Another process bound to the port | Change `--port` or locate the conflict with `netstat` / `ss` |
 
 ---
 
 ## License
 
-Distributed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE).

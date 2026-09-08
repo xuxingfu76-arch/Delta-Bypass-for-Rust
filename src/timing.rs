@@ -1,13 +1,12 @@
 //! 记时间：看每一步花了多久
 //! Timing: see how long each step took
 //!
-//! 一次绕过要走好几步（做验证码、提交、查钥匙……），想知道慢在哪就得分开记。
+//! 一次绕过要走好几步（提交、查钥匙……），想知道慢在哪就得分开记。
 //! 这里做的就是一个很简单的秒表：按名字累加时间，最后能列出清单。
 //!
-//! One bypass goes through several steps (picture puzzle, submit, check for the
-//! key, and so on), and to know where the time goes you have to record them
-//! separately. This is a plain stopwatch: it adds up time under a name and can
-//! print a list at the end.
+//! One bypass goes through several steps (submit, check for the key, and so on),
+//! and to know where the time goes you have to record them separately. This is a
+//! plain stopwatch: it adds up time under a name and can print a list at the end.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -104,9 +103,6 @@ impl Timer {
 /// 步骤名字，写成常量避免各处拼错。
 /// Step names as constants, so they cannot be misspelled in different places.
 pub mod steps {
-    /// 做验证码。
-    /// Working out the picture puzzle.
-    pub const CAPTCHA: &str = "captcha";
     /// 问服务器这个链接的情况。
     /// Asking the server about this link.
     pub const META: &str = "meta";

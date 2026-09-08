@@ -338,13 +338,20 @@ fn escape(text: &str) -> String {
 
 /// 提交一次，往前推进一关。
 ///
+/// 新版协议不校验 `captcha` 字段（可为 null），历史遗留的图形验证码已随上游换用
+/// orbit 类型而作废；这里按真实浏览器抓包的形态发 null。
+///
 /// 遇到网络抖动会当场重试几次。返回的就是服务器给的原始内容。
 ///
 /// Submit once, to move one checkpoint forward.
 ///
+/// The new protocol does not check the `captcha` field (null is fine); the old
+/// picture captcha died with the upstream switch to the orbit type, so we send
+/// null exactly as a real browser capture shows.
+///
 /// Network hiccups get retried on the spot a few times. What comes back is the
 /// server's reply as-is.
-pub fn submit(ticket: &str, token: &str, service: i64) -> Value {
+pub fn submit(ticket: &str, service: i64) -> Value {
     // 浏览器说明取一次，请求头和加密内容共用同一个。
     // Take the browser note once and use it for both the header and the
     // encrypted content.
@@ -370,7 +377,7 @@ pub fn submit(ticket: &str, token: &str, service: i64) -> Value {
         service
     );
     let body = json!({
-        "captcha": token,
+        "captcha": Value::Null,
         "meta": payload.meta,
         "stream": payload.stream,
         "resolved": true
@@ -386,6 +393,8 @@ pub fn submit(ticket: &str, token: &str, service: i64) -> Value {
             .header("User-Agent", ua.agent)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/plain, */*")
+            .header("x-client-name", "platoboost webclient")
+            .header("x-client-version", "5.3.7")
             .send();
 
         match sent {
@@ -622,7 +631,7 @@ AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Mobile/15E148 Safari/604
     /// This does not touch the network — the length check returns before any request goes out.
     #[test]
     fn 短凭据提交返回错误_submitting_a_short_credential_returns_an_error() {
-        let reply = submit("tooshort", "sometoken", 3);
+        let reply = submit("tooshort", 3);
 
         assert_eq!(
             reply.get("success").and_then(Value::as_bool),

@@ -50,7 +50,6 @@ use crate::auth;
 use crate::chain;
 use crate::config;
 use crate::net;
-use crate::pool;
 
 /// 记下来的一个钥匙。
 /// One remembered key.
@@ -252,12 +251,12 @@ fn run_once(ticket: &str) -> Result0 {
 
 /// 跑一趟，不行再跑一趟。
 ///
-/// 第一趟失败常常是一时的（网络抖了、验证码没认出来），再来一次多半就好了。
+/// 第一趟失败常常是一时的（网络抖了、对面上游抽风），再来一次多半就好了。
 /// 但"链接本身废了"这种不重试 —— 再跑一百次也是废的。
 ///
 /// Try once, and again if it fails.
 ///
-/// A first failure is often momentary (a network wobble, a puzzle not recognised) and
+/// A first failure is often momentary (a network wobble, an upstream hiccup) and
 /// a second go usually works. But a dead link is not retried — it would be dead a
 /// hundred more times.
 fn run_with_retry(ticket: &str) -> Result0 {
@@ -477,12 +476,8 @@ async fn delta(
 
 /// 开始提供服务。
 ///
-/// `ready_puzzles` 是预备池要存多少道，0 就是不备。
-///
 /// Start serving.
-///
-/// `ready_puzzles` is how many puzzles to keep ready; 0 turns it off.
-pub fn serve(host: &str, port: u16, ready_puzzles: usize) {
+pub fn serve(host: &str, port: u16) {
     let shared = Arc::new(Shared {
         remembered: Mutex::new(load_remembered()),
         running: Mutex::new(HashMap::new()),
@@ -491,10 +486,6 @@ pub fn serve(host: &str, port: u16, ready_puzzles: usize) {
     // 先把连接开好，第一个请求就不用等握手了。
     // Open the connections first, so the very first request skips the handshake.
     std::thread::spawn(net::warm_up_all);
-
-    // 后台开始备题。
-    // Start preparing puzzles in the background.
-    pool::start(ready_puzzles, (*net::captcha_client()).clone());
 
     let runtime = tokio::runtime::Runtime::new().expect("初始化运行时 / initialise the runtime");
 
@@ -507,10 +498,6 @@ pub fn serve(host: &str, port: u16, ready_puzzles: usize) {
             .expect("绑定端口 / bind the port");
 
         println!("[服务] Delta 绕过器已启动 / Delta bypass service started: http://{}", address);
-        println!(
-            "[服务] 验证码预备池容量 {} / Captcha pool capacity: {}",
-            ready_puzzles, ready_puzzles
-        );
         println!(
             "[警告] 接口未启用鉴权，请勿直接暴露至公网 / \
              No authentication enabled; do not expose to the public internet"

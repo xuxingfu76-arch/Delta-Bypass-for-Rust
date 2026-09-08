@@ -1,6 +1,6 @@
 [Unit]
 Description=Delta 绕过器 / Delta bypass service
-Documentation=https://github.com/AbabaHnb/Delta-bypass
+Documentation=https://github.com/AbabaHnb/Delta-Bypass-for-Rust
 After=network-online.target
 Wants=network-online.target
 
@@ -20,8 +20,7 @@ WorkingDirectory=/opt/delta-bypass
 ExecStart=/opt/delta-bypass/delta-bypass \
     --serve \
     --host 127.0.0.1 \
-    --port 2233 \
-    --prepared 30
+    --port 2233
 
 Restart=always
 RestartSec=5

@@ -4,38 +4,46 @@
 //! 整条路是这样的：
 //!
 //! ```text
-//! 链接 → 问情况 → 识别验证码 → 提交 → 解出下一段 → 再提交 → … → 拿到钥匙
-//! link → ask about it → picture puzzle → submit → decode next → submit again → … → key
+//! 链接 → 问情况 → 提交 → 解出下一段 → 再提交 → … → 拿到钥匙
+//! link → ask about it → submit → decode next → submit again → … → key
 //! ```
 //!
 //! 三个省时间的做法：
 //!
-//! 1. **问情况、查钥匙、识别验证码三件事一起干。** 识别要花一秒多，那段时间正好用来问
-//!    服务器情况、顺便看看这链接是不是已经完成过了。
+//! 1. **第一轮三件事同时发。** 提交不等 meta（服务编号先用兜底值），和"问情况"
+//!    "查钥匙"并行 —— 省一趟串行往返。
 //!
-//! 2. **一道题走完全程。** 凭证换一次就够，不用每关都重新识别。
+//! 2. **问情况和查钥匙一起干。** 问服务器情况的那段时间，顺便看看这链接是不是已经
+//!    完成过了。
 //!
 //! 3. **提交和查钥匙叠着做。** 提交发出去 50 毫秒后就开始查钥匙，不等提交回话 ——
 //!    省掉一趟来回。
 //!
+//! 注：上游已取消图形验证码环节（step 的 `captcha` 字段不校验），所以这里不再有
+//! 识别步骤。
+//!
 //! The whole route looks like this:
 //!
 //! ```text
-//! link → ask about it → picture puzzle → submit → decode next → submit again → … → key
+//! link → ask about it → submit → decode next → submit again → … → key
 //! ```
 //!
 //! Three things that save time:
 //!
-//! 1. **Ask about it, check for the key, and do the puzzle all at once.** The puzzle
-//!    takes over a second, and that time is used to ask the server about the link and
-//!    to see whether it has already been completed.
+//! 1. **Fire three things at once on the first round.** The submission does not
+//!    wait for meta (it starts with the fallback service number), running in
+//!    parallel with the link query and the key check — one serial round trip
+//!    saved.
 //!
-//! 2. **One puzzle for the whole route.** Swapping for a token once is enough; there
-//!    is no need to redo the puzzle at every checkpoint.
+//! 2. **Ask about it and check for the key at once.** While asking the server about
+//!    the link, also see whether it has already been completed.
 //!
 //! 3. **Overlap submitting with checking for the key.** Checking starts 50
 //!    milliseconds after the submission goes out, without waiting for its reply — one
 //!    round trip saved.
+//!
+//! Note: the far end dropped the picture captcha (the step `captcha` field is not
+//! checked), so there is no recognition step any more.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -45,9 +53,6 @@ use serde_json::{json, Value};
 
 use crate::auth;
 use crate::config;
-use crate::net;
-use crate::pool;
-use crate::solver;
 use crate::timing::{steps, Timer};
 
 /// 服务编号。上游告诉我们用哪个；问不出来就用这个兜底。
@@ -118,155 +123,6 @@ fn note_too_fast() {
         .min(config::GAP_MARGIN_MAX.as_millis() as u64);
 
     MARGIN_MS.store(more, Ordering::Relaxed);
-}
-
-// ---------------------------------------------------------------------------
-// 换通行凭证 / Getting a pass token
-// ---------------------------------------------------------------------------
-
-/// 拿一个通行凭证。
-///
-/// 先看预备池里有没有现成的 —— 有的话只剩最后一步"换凭证"，快得多。没有就当场从头
-/// 做一道。
-///
-/// 不管哪条路，凭证都是这一刻换的，换完立刻用掉。
-///
-/// Get a pass token.
-///
-/// First look for one ready in the store — if there is, only the final swap remains,
-/// which is much quicker. If not, do one from scratch on the spot.
-///
-/// Either way the token is swapped for at this moment and used immediately.
-fn get_token(
-    client: &reqwest::blocking::Client,
-    talk: bool,
-    timer: &mut Timer,
-) -> Result<String, String> {
-    timer.start(steps::CAPTCHA);
-
-    // ---- 快路：用备好的题 ----
-    // ---- Quick route: use a ready-made puzzle ----
-    if let Some(ready) = pool::take() {
-        match pool::swap_for_token(client, &ready) {
-            Ok((token, swap_ms)) => {
-                timer.stop();
-                let left = pool::snapshot();
-                say(
-                    talk,
-                    &format!(
-                        "  [验证码] 类型={} 坐标=({:.0},{:.0}) 策略={} 识别={:.0}ms \
-                         (来源=预备池 缓存年龄={:.1}s 令牌签发={:.0}ms 池余量={})",
-                        ready.kind, ready.x, ready.y, ready.method, ready.took_ms,
-                        ready.made_at.elapsed().as_secs_f64(), swap_ms, left.usable
-                    ),
-                );
-                return Ok(token);
-            }
-            Err(why) => {
-                // 这道题不能用了，走当场做的路，别卡在这。
-                // This one is no good, so fall through to doing one on the spot rather
-                // than getting stuck here.
-                say(talk, &format!("  [验证码] 预备条目失效({})，转为即时识别", why));
-            }
-        }
-    }
-
-    // ---- 慢路：当场从头做一道 ----
-    // ---- Slow route: do one from scratch on the spot ----
-    for round in 0..config::CAPTCHA_MAX_RETRIES {
-        let fetch_start = Instant::now();
-
-        let puzzle: Value = match client
-            .get(format!("{}/challenge", config::CAPTCHA_API))
-            .timeout(config::IMAGE_TIMEOUT)
-            .send()
-            .and_then(|r| r.json())
-        {
-            Ok(v) => v,
-            Err(e) => {
-                say(talk, &format!("  [验证码] 获取挑战失败: {}", e));
-                break;
-            }
-        };
-        let fetch_ms = fetch_start.elapsed().as_secs_f64() * 1000.0;
-
-        let picture_path = puzzle.get("image").and_then(Value::as_str).unwrap_or("");
-        let kind = puzzle.get("type").and_then(Value::as_str).unwrap_or("");
-
-        let download_start = Instant::now();
-        let picture = match client
-            .get(format!("{}{}", config::CAPTCHA_HOST, picture_path))
-            .header("Referer", format!("{}/", config::CAPTCHA_HOST))
-            .timeout(config::IMAGE_TIMEOUT)
-            .send()
-            .and_then(|r| r.bytes())
-        {
-            Ok(b) => b.to_vec(),
-            Err(e) => {
-                say(talk, &format!("  [验证码] 下载图像失败: {}", e));
-                break;
-            }
-        };
-        let download_ms = download_start.elapsed().as_secs_f64() * 1000.0;
-
-        let solve_start = Instant::now();
-        let (choice, method) = solver::solve(&picture, kind);
-        let solve_ms = solve_start.elapsed().as_secs_f64() * 1000.0;
-
-        let Some((x, y)) = choice else {
-            say(
-                talk,
-                &format!("  [验证码] 第{}次尝试: 识别未命中({:.0}ms)，重新获取挑战", round + 1, solve_ms),
-            );
-            continue;
-        };
-
-        let swap_start = Instant::now();
-        let reply: Value = match client
-            .post(format!("{}/answer", config::CAPTCHA_API))
-            .json(&json!({ "challenge_id": puzzle["challenge_id"], "x": x, "y": y }))
-            .timeout(config::IMAGE_TIMEOUT)
-            .send()
-            .and_then(|r| r.json())
-        {
-            Ok(v) => v,
-            Err(e) => {
-                say(talk, &format!("  [验证码] 提交答案失败: {}", e));
-                break;
-            }
-        };
-        let swap_ms = swap_start.elapsed().as_secs_f64() * 1000.0;
-
-        if reply.get("success").and_then(Value::as_bool) == Some(true) {
-            let token = reply
-                .get("token")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-
-            timer.stop();
-            say(
-                talk,
-                &format!(
-                    "  [验证码] 类型={} 坐标=({:.0},{:.0}) 策略={} 识别={:.0}ms \
-                     (获取挑战={:.0}ms 下载图像={:.0}ms 令牌签发={:.0}ms)",
-                    kind, x, y, method, solve_ms, fetch_ms, download_ms, swap_ms
-                ),
-            );
-            return Ok(token);
-        }
-
-        say(
-            talk,
-            &format!("  [验证码] 第{}次尝试: 服务端校验未通过({:.0}ms)，重新获取挑战", round + 1, solve_ms),
-        );
-    }
-
-    timer.stop();
-    Err(format!(
-        "验证码识别失败(共尝试{}次) / Captcha recognition failed after {} attempts",
-        config::CAPTCHA_MAX_RETRIES, config::CAPTCHA_MAX_RETRIES
-    ))
 }
 
 /// verbose 模式下才打印。
@@ -380,6 +236,49 @@ fn ask_about(ticket: &str, talk: bool) -> LinkInfo {
     }
 }
 
+/// [`take_in_info`] 的产出。
+/// What [`take_in_info`] hands back.
+struct LinkTake {
+    /// 死链原因。活链接是空。
+    /// Why the link is dead. Empty for a live one.
+    dead: Option<String>,
+    /// meta 报的服务编号。
+    /// The service number meta reported.
+    service: Option<i64>,
+}
+
+/// 收下 meta 的结果：死链给出原因，关卡数多就把轮数上限放宽，顺带传出服务编号。
+///
+/// Take in the meta result: a dead link carries its reason, more checkpoints widen
+/// the round cap, and the service number is passed along.
+fn take_in_info(info: LinkInfo, talk: bool, rounds_allowed: &mut usize) -> LinkTake {
+    if !info.alive {
+        return LinkTake {
+            dead: info.dead_reason,
+            service: None,
+        };
+    }
+
+    // 关卡数比预设多，就把轮数放宽。留一轮余量，因为最后一关之后还要取钥匙。
+    // More checkpoints than assumed, so loosen the round cap. One spare round is
+    // added, since the key still has to be fetched after the last checkpoint.
+    if let Some(count) = info.checkpoints {
+        let need = (count + 1) as usize;
+        if need > *rounds_allowed {
+            *rounds_allowed = need.min(config::MAX_ROUNDS_HARD_CAP);
+            say(
+                talk,
+                &format!("  [轮数] 检查点数={}，上限调整为{}轮", count, rounds_allowed),
+            );
+        }
+    }
+
+    LinkTake {
+        dead: None,
+        service: info.service,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 查钥匙 / Checking for the key
 // ---------------------------------------------------------------------------
@@ -397,7 +296,8 @@ fn check_key(ticket: &str, talk: bool, timer: Option<&mut Timer>) -> Option<Stri
         t.stop();
     }
 
-    let body = reply.get("data").unwrap_or(&reply);    let key = body.get("key").and_then(Value::as_str).unwrap_or("");
+    let body = reply.get("data").unwrap_or(&reply);
+    let key = body.get("key").and_then(Value::as_str).unwrap_or("");
 
     // 服务器用 KEY_NOT_FOUND 表示"还没好"，那不是钥匙。
     // The server uses KEY_NOT_FOUND to mean "not ready yet", which is not a key.
@@ -427,7 +327,7 @@ fn wait_for_key(ticket: &str, talk: bool, timer: &mut Timer) -> Option<String> {
 // 提交 / Submitting
 // ---------------------------------------------------------------------------
 
-/// 看服务器是不是在说"你太快了"。
+/// 看服务器是不是在说"太快了"。
 /// See whether the server is saying "you are going too fast".
 fn says_too_fast(reply: &Value) -> bool {
     let mut all = String::new();
@@ -439,6 +339,25 @@ fn says_too_fast(reply: &Value) -> bool {
     }
     let lower = all.to_lowercase();
     lower.contains("too fast") || lower.contains("slow down") || lower.contains("too many")
+}
+
+/// 看服务器是不是在说"服务编号不对"。
+///
+/// 兜底服务编号（Delta=3）被别的链接拒绝时靠它识别，好换 meta 报的编号补一发。
+///
+/// See whether the server is saying the service number is wrong.
+///
+/// This spots the fallback service number (Delta = 3) being refused by another
+/// link, so a follow-up can be made with the number meta reported.
+fn says_wrong_service(reply: &Value) -> bool {
+    let mut all = String::new();
+    for field in ["message", "error", "detail"] {
+        if let Some(text) = reply.get(field).and_then(Value::as_str) {
+            all.push_str(text);
+            all.push(' ');
+        }
+    }
+    all.to_lowercase().contains("incorrect service")
 }
 
 /// 提交一次的结果。
@@ -475,7 +394,6 @@ struct SubmitResult {
 /// 3. Check for the key at the same time (when `overlap` is true)
 fn submit_once(
     ticket: &str,
-    token: &str,
     service: Option<i64>,
     talk: bool,
     timer: &mut Timer,
@@ -569,7 +487,7 @@ fn submit_once(
             let sent_at = Instant::now();
             *last_sent = Some(sent_at);
 
-            let reply = auth::submit(ticket, token, service_number);
+            let reply = auth::submit(ticket, service_number);
             let took_ms = sent_at.elapsed().as_secs_f64() * 1000.0;
 
             // 花的时间明显偏长，说明里面重试过，真正最后一次发出比 sent_at 晚。
@@ -680,25 +598,26 @@ pub fn run(ticket: &str, talk: bool, max_rounds: usize) -> Outcome {
     let mut round = 0usize;
     let mut stopped_at = "已达轮数上限 / Round limit reached";
     let mut last_sent: Option<Instant> = None;
-    let mut token: Option<String> = None;
-
-    // 共用的连接。出连接层问题才换。
-    // The shared connection. Only swapped if something goes wrong at that level.
-    let mut client = net::captcha_client();
 
     while round < rounds_allowed {
         say(talk, &format!("  [第 {}/{} 轮]", round + 1, rounds_allowed));
         timer.start(steps::META);
 
-        // ---- 三件事一起干 ----
+        // ---- 三件事一起发 ----
         // ---- Three things at once ----
         //
-        // 识别验证码要一秒多，这段时间正好用来问链接情况。第一轮还顺便查一下钥匙 ——
-        // 万一这链接之前已经走完了，就能直接返回，一秒都不用花。
+        // 第一轮：问链接情况、查钥匙、提交 step 全部并行发出（提交不等 meta，
+        // 服务编号先用兜底值）。万一这链接之前已经走完了，钥匙那趟直接给出结果。
         //
-        // The puzzle takes over a second, and that time is used to ask about the link.
-        // On the first round we also check for the key — if this link was already
-        // finished before, we can return straight away without spending a second.
+        // 后续轮：问情况和提交并行发出，提交内部再叠着查钥匙。
+        //
+        // First round: the link query, the key check and the step submission all go
+        // out together (the submission does not wait for meta; it starts with the
+        // fallback service number). If this link was already finished before, the
+        // key check hands us the answer straight away.
+        //
+        // Later rounds: the query and the submission go out together, and the
+        // submission itself overlaps the key check.
         let (info_sender, info_receiver) = mpsc::channel();
         let (key_sender, key_receiver) = mpsc::channel();
 
@@ -716,135 +635,124 @@ pub fn run(ticket: &str, talk: bool, max_rounds: usize) -> Outcome {
             None
         };
 
-        // 凭证换一次就够，整条路都用它。
-        // One token is enough; it serves the whole route.
-        if token.is_none() {
-            match get_token(&client, talk, &mut timer) {
-                Ok(t) => token = Some(t),
-                Err(why) => {
-                    say(talk, &format!("  [错误] {}", why));
-                    say(talk, "  [重试] 重建连接后再次识别");
+        let mut result;
 
-                    // 有可能是连接坏了，换一条重来。
-                    // The connection may have gone bad, so swap it and try again.
-                    net::reset_captcha_client();
-                    client = net::captcha_client();
+        if round == 0 {
+            // ---- 第一轮：三件事同时发，谁也不等谁 ----
+            // ---- First round: fire all three at once, none waits on another ----
+            //
+            // step 不等 meta：服务编号直接用兜底值（Delta=3）先发出去，
+            // 和"问情况""查钥匙"并行 —— 省一趟串行往返。万一兜底服务编号被拒
+            // （非 Delta 的链接），等 meta 回来拿它报的服务编号补一发就是。
+            //
+            // The step does not wait for meta: it goes straight out with the
+            // fallback service number (Delta = 3), in parallel with the link query
+            // and the key check — one serial round trip saved. Should the fallback
+            // service number be refused (a non-Delta link), meta's number is used
+            // for a follow-up attempt.
+            result = submit_once(&ticket, None, talk, &mut timer, &mut last_sent, false);
 
-                    match get_token(&client, talk, &mut timer) {
-                        Ok(t) => token = Some(t),
-                        Err(why2) => {
-                            say(talk, &format!("  [错误] {}", why2));
-                            say(talk, "  [终止] 验证码识别连续失败，无法继续");
-
-                            let _ = info_worker.join();
-                            if let Some(w) = key_worker {
-                                let _ = w.join();
-                            }
-
-                            return Outcome {
-                                key: None,
-                                timer,
-                                stopped_at: "验证码识别失败 / Captcha recognition failed",
-                            };
-                        }
-                    }
-                }
-            }
-        }
-
-        // ---- 第一轮：看看是不是已经完成过了 ----
-        // ---- First round: see whether it was already finished ----
-        if let Some(worker) = key_worker {
-            if let Ok(Some(key)) = key_receiver.recv_timeout(Duration::from_secs(6)) {
-                say(talk, "  [会话] 该链接此前已完成，直接返回既有密钥");
-                let _ = worker.join();
-                let _ = info_worker.join();
-
-                return Outcome {
-                    key: Some(key),
-                    timer,
-                    stopped_at: "链接此前已完成 / Link was already completed",
-                };
-            }
-            let _ = worker.join();
-        }
-
-        // ---- 收下链接情况 ----
-        // ---- Take in what we learned about the link ----
-        //
-        // 每轮都重新问一次，所以服务编号也每轮重新拿，不用跨轮记着。
-        // Each round asks again, so the service number is taken fresh each round rather
-        // than remembered across rounds.
-        let mut service: Option<i64> = None;
-
-        match info_receiver.recv_timeout(Duration::from_secs(6)) {
-            Ok(info) => {
-                service = info.service;
-
-                // 明确说废了就别浪费时间了。
-                // Plainly dead, so stop wasting time.
-                if !info.alive {
-                    timer.invalid_reason = info.dead_reason.clone();
-                    say(
-                        talk,
-                        &format!("  [终止] 链接已失效: {}", info.dead_reason.unwrap_or_default()),
-                    );
+            // 并行那趟"是否已完成"此刻早出结果了。链接之前走完过的话直接拿钥匙。
+            // The parallel "already finished?" check has its answer by now. If the
+            // link was completed before, take the key straight away.
+            if let Some(worker) = key_worker {
+                if let Ok(Some(key)) = key_receiver.recv_timeout(Duration::from_secs(6)) {
+                    say(talk, "  [会话] 该链接此前已完成，直接返回既有密钥");
+                    let _ = worker.join();
                     let _ = info_worker.join();
 
                     return Outcome {
-                        key: None,
+                        key: Some(key),
                         timer,
-                        stopped_at: "链接已失效 / Link is invalid",
+                        stopped_at: "链接此前已完成 / Link was already completed",
                     };
                 }
+                let _ = worker.join();
+            }
 
-                // 关卡数比预设多，就把轮数放宽。留一轮余量，因为最后一关之后还要取钥匙。
-                // More checkpoints than assumed, so loosen the round cap. One spare
-                // round is added, since the key still has to be fetched after the last
-                // checkpoint.
-                if let Some(count) = info.checkpoints {
-                    let need = (count + 1) as usize;
-                    if need > rounds_allowed {
-                        rounds_allowed = need.min(config::MAX_ROUNDS_HARD_CAP);
-                        say(
-                            talk,
-                            &format!("  [轮数] 检查点数={}，上限调整为{}轮", count, rounds_allowed),
-                        );
+            // 收下 meta 的结果：死链终止、轮数放宽；服务编号被拒时准备补一发。
+            // Take in the meta result: stop on a dead link, widen the round cap;
+            // ready a follow-up should the service number have been refused.
+            let mut retry_service: Option<i64> = None;
+
+            match info_receiver.recv_timeout(Duration::from_secs(6)) {
+                Ok(info) => {
+                    let taken = take_in_info(info, talk, &mut rounds_allowed);
+
+                    if let Some(why) = taken.dead {
+                        timer.invalid_reason = Some(why.clone());
+                        say(talk, &format!("  [终止] 链接已失效: {}", why));
+                        let _ = info_worker.join();
+
+                        return Outcome {
+                            key: None,
+                            timer,
+                            stopped_at: "链接已失效 / Link is invalid",
+                        };
+                    }
+
+                    if result.service.is_none() && says_wrong_service(&result.reply) {
+                        retry_service = taken.service;
                     }
                 }
+                Err(_) => {
+                    // 问不出来就当没这回事，提交已经按兜底服务编号发过了。
+                    // Nothing came back, so never mind — the submission already went
+                    // out with the fallback service number.
+                    let _ = info_worker.join();
+                }
             }
-            Err(_) => {
-                // 问不出来就往下走，用兜底服务编号。
-                // Nothing came back, so carry on with the fallback service number.
-                let _ = info_worker.join();
+
+            timer.stop();
+
+            // 兜底服务编号被拒，用 meta 报的那个补一发。
+            // The fallback service number was refused, so retry with meta's.
+            if let Some(svc) = retry_service {
+                result = submit_once(&ticket, Some(svc), talk, &mut timer, &mut last_sent, false);
             }
+        } else {
+            // ---- 后续轮：先等 meta，再提交 ----
+            // ---- Later rounds: wait for meta first, then submit ----
+            //
+            // 间隙等待反正要 5 秒，meta 那一趟完全被它盖住，等它拿准服务编号
+            // 不吃亏。
+            //
+            // The gap wait is 5 seconds anyway, which completely covers the meta
+            // trip, so waiting for it to get the service number right costs nothing.
+            let mut service: Option<i64> = None;
+
+            match info_receiver.recv_timeout(Duration::from_secs(6)) {
+                Ok(info) => {
+                    let taken = take_in_info(info, talk, &mut rounds_allowed);
+
+                    if let Some(why) = taken.dead {
+                        timer.invalid_reason = Some(why.clone());
+                        say(talk, &format!("  [终止] 链接已失效: {}", why));
+                        let _ = info_worker.join();
+
+                        return Outcome {
+                            key: None,
+                            timer,
+                            stopped_at: "链接已失效 / Link is invalid",
+                        };
+                    }
+
+                    service = taken.service;
+                }
+                Err(_) => {
+                    // 问不出来就往下走，用兜底服务编号。
+                    // Nothing came back, so carry on with the fallback service number.
+                    let _ = info_worker.join();
+                }
+            }
+
+            timer.stop();
+
+            // 后续轮叠着查钥匙：提交发出 50 毫秒后就开始查，不等回话。
+            // Later rounds overlap the key check: it starts 50 milliseconds after
+            // the submission goes out, without waiting for its reply.
+            result = submit_once(&ticket, service, talk, &mut timer, &mut last_sent, true);
         }
-
-        timer.stop();
-
-        // ---- 接下来要闲 5 秒，趁这段时间叫后台补题 ----
-        // ---- Five idle seconds coming up, so nudge the background to top up ----
-        if round > 0 {
-            pool::nudge();
-        }
-
-        // ---- 提交 ----
-        // ---- Submit ----
-        //
-        // 第一轮不叠着查钥匙 —— 才刚开始，钥匙不可能好，白查一趟。
-        // No overlapping check on the first round — it has only just begun, the key
-        // cannot possibly be ready, and the trip would be wasted.
-        let overlap = round > 0;
-
-        let result = submit_once(
-            &ticket,
-            token.as_deref().unwrap_or(""),
-            service,
-            talk,
-            &mut timer,
-            &mut last_sent,
-            overlap,
-        );
 
         // 叠着查的那趟已经拿到钥匙了，直接结束。
         // The overlapping check already got the key, so we are done.
@@ -1014,6 +922,57 @@ mod tests {
 
         let d = json!({ "message": "invalid payload." });
         assert!(!says_too_fast(&d), "链接废了不是太快 / a dead link is not going too fast");
+    }
+
+    #[test]
+    fn 服务编号不对能认出来_recognises_a_wrong_service() {
+        let a = json!({ "message": "incorrect service (advertiser) provided." });
+        assert!(says_wrong_service(&a));
+
+        let b = json!({ "message": "finishing checkpoints too fast" });
+        assert!(
+            !says_wrong_service(&b),
+            "太快不是编号不对 / going too fast is not a wrong service number"
+        );
+
+        let c = json!({ "message": "invalid payload." });
+        assert!(
+            !says_wrong_service(&c),
+            "链接废了不是编号不对 / a dead link is not a wrong service number"
+        );
+    }
+
+    #[test]
+    fn 收下情况会放宽轮数_take_in_info_widens_the_round_cap() {
+        let info = LinkInfo {
+            service: Some(3),
+            checkpoints: Some(7),
+            alive: true,
+            dead_reason: None,
+        };
+
+        let mut rounds = 3usize;
+        let taken = take_in_info(info, false, &mut rounds);
+
+        assert!(taken.dead.is_none());
+        assert_eq!(taken.service, Some(3));
+        assert_eq!(rounds, 8, "7 个检查点应该放宽到 8 轮 / 7 checkpoints should widen to 8 rounds");
+    }
+
+    #[test]
+    fn 死链会带出原因_take_in_info_carries_the_reason() {
+        let info = LinkInfo {
+            service: None,
+            checkpoints: None,
+            alive: false,
+            dead_reason: Some("expired".into()),
+        };
+
+        let mut rounds = 3usize;
+        let taken = take_in_info(info, false, &mut rounds);
+
+        assert_eq!(taken.dead.as_deref(), Some("expired"));
+        assert_eq!(rounds, 3, "死链不该动轮数 / a dead link should not touch the round cap");
     }
 
     #[test]

@@ -11,14 +11,6 @@ use std::time::Duration;
 // 网址 / Web addresses
 // ---------------------------------------------------------------------------
 
-/// 验证码服务器。
-/// The server that hands out picture puzzles.
-pub const CAPTCHA_HOST: &str = "https://captcha.platorelay.com";
-
-/// 验证码的接口前缀。
-/// The address prefix for picture puzzle requests.
-pub const CAPTCHA_API: &str = "https://captcha.platorelay.com/api";
-
 /// 登录服务器的接口前缀。
 /// The address prefix for the login server.
 pub const AUTH_API: &str = "https://auth.platorelay.com/api";
@@ -110,10 +102,6 @@ pub const POLL_OVERLAP_DELAY: Duration = Duration::from_millis(50);
 // 出错重试 / Retrying after problems
 // ---------------------------------------------------------------------------
 
-/// 验证码识别失败时，当场重试几次。
-/// How many times we retry on the spot when a picture puzzle is not recognised.
-pub const CAPTCHA_MAX_RETRIES: usize = 1;
-
 /// 被对面拦下时重试几次。
 /// How many times we retry when the far end holds us back.
 pub const STEP_THROTTLE_RETRIES: usize = 2;
@@ -144,63 +132,6 @@ pub const DEFAULT_MAX_ROUNDS: usize = 3;
 pub const MAX_ROUNDS_HARD_CAP: usize = 12;
 
 // ---------------------------------------------------------------------------
-// 预备验证码 / Captcha puzzles kept ready in advance
-// ---------------------------------------------------------------------------
-
-/// 预备好的题放多久就丢弃。
-///
-/// 服务器说一道题能用 60 秒。我们只留 30 秒，留足余地。
-///
-/// How long a ready-made puzzle is kept before being thrown away.
-///
-/// The server says a puzzle lasts 60 seconds. We only keep ours 30, to leave
-/// plenty of room.
-pub const POOL_MAX_AGE: Duration = Duration::from_secs(30);
-
-/// 剩余时间不到这么多就不发给别人用了，怕提交的时候正好过期。
-/// If a puzzle has less than this much life left we stop handing it out, in case
-/// it expires mid-submission.
-pub const POOL_USE_MARGIN: Duration = Duration::from_millis(1500);
-
-/// 要题的时候最多等多久；等不到就当场自己做一道。
-/// How long a caller waits for a ready-made puzzle; if none turns up it just does
-/// one itself.
-pub const POOL_TAKE_TIMEOUT: Duration = Duration::from_millis(50);
-
-/// 备题的最快速度：每这么久最多做一道。
-///
-/// 实测每秒一道可以一直跑（连续 70 次全部正常）；一拥而上就会被服务器限流，
-/// 而且限流之后连当场做题也一起失败。这个数字不要往小调。
-///
-/// Fastest we prepare puzzles: at most one per this long.
-///
-/// Measured: one per second runs indefinitely (70 in a row, all fine). Rushing
-/// several at once gets us rate-limited, and once that happens even puzzles done
-/// on the spot start failing. Do not lower this.
-pub const POOL_MIN_SLOT_INTERVAL: Duration = Duration::from_millis(950);
-
-/// 同时最多做几道题。
-/// How many puzzles we prepare at the same time.
-pub const POOL_MAX_INFLIGHT: usize = 2;
-
-/// 后台做题的线程数。它们要抢时间片，所以这个数不等于速度。
-/// How many background threads prepare puzzles. They queue for time slots, so
-/// this number is not the speed.
-pub const POOL_WORKERS: usize = 3;
-
-/// 被服务器拒绝后，第一次歇多久。
-/// After the server refuses us, how long we rest the first time.
-pub const POOL_BACKOFF_START: Duration = Duration::from_secs(5);
-
-/// 反复被拒时，歇的时间最多到这么长。
-/// If refusals keep coming, the rest never grows past this.
-pub const POOL_BACKOFF_MAX: Duration = Duration::from_secs(60);
-
-/// 预备池默认放多少道。
-/// How many ready-made puzzles we aim to keep by default.
-pub const POOL_DEFAULT_SIZE: usize = 30;
-
-// ---------------------------------------------------------------------------
 // 网络连接 / Network connections
 // ---------------------------------------------------------------------------
 
@@ -212,19 +143,14 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long we wait at most for one whole request.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// 下载图片最多等多久。图片有 45KB 左右，给宽松些。
-/// How long we wait at most to download a picture. They are around 45KB, so this
-/// is generous.
-pub const IMAGE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// 连接闲着多久还留着不关。
 ///
-/// 留着很重要：45KB 的图片走已经开好的连接大约 25 毫秒，重新开一条要 660 毫秒。
+/// 留着很重要：走已经开好的连接发一次请求，比新开一条快一倍。
 ///
 /// How long an idle connection is kept open.
 ///
-/// Keeping them matters: a 45KB picture takes around 25 milliseconds over an
-/// already-open connection, versus 660 milliseconds over a fresh one.
+/// Keeping them matters: a request over an already-open connection is about
+/// twice as fast as over a fresh one.
 pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,6 @@
 //! delta-bypass --serve               开成网页接口
 //! ```
 //!
-//! 还有两个调试用的：`--img` 拿本地图片文件试一下认得对不对，`--pool-stats` 单独看
-//! 预备池的状况。
-//!
 //! Three ways to use it:
 //!
 //! ```text
@@ -19,15 +16,12 @@
 //! delta-bypass --generate 3          make 3 test links and bypass them
 //! delta-bypass --serve               run as a web interface
 //! ```
-//!
-//! Two more for debugging: `--img` tries a local picture file to see whether it is read
-//! correctly, and `--pool-stats` watches the puzzle store on its own.
 
 use std::time::{Duration, Instant};
 
 use clap::{CommandFactory, Parser};
 
-use delta_bypass::{api, auth, chain, config, link, net, platform, pool, solver, timing};
+use delta_bypass::{api, auth, chain, config, link, net, platform, timing};
 
 /// 命令行参数。
 /// Command line options.
@@ -36,8 +30,8 @@ use delta_bypass::{api, auth, chain, config, link, net, platform, pool, solver, 
     name = "delta-bypass",
     version,
     about = "Delta 钥匙绕过器 / Delta key bypass",
-    long_about = "自动处理验证码和关卡，从链接拿到钥匙。\n\
-                  Handles picture puzzles and checkpoints automatically, turning a link into a key."
+    long_about = "自动处理关卡，从链接拿到钥匙。\n\
+                  Handles checkpoints automatically, turning a link into a key."
 )]
 struct Options {
     /// 要绕过的东西：链接、通行串，或者存了这些的文件
@@ -76,38 +70,8 @@ struct Options {
 
     /// 网页接口监听哪个地址（只想本机能用就填 127.0.0.1）
     /// Which address it listens on (use 127.0.0.1 for local access only)
-    #[arg(long = "host", default_value = config::DEFAULT_HOST)]
+    #[arg(long = "host", default_value_t = config::DEFAULT_HOST.to_string())]
     host: String,
-
-    /// 预备池存多少道，0 就是不备
-    /// How many puzzles to keep ready; 0 turns it off
-    #[arg(long = "prepared", default_value_t = config::POOL_DEFAULT_SIZE)]
-    prepared: usize,
-
-    /// 调试：拿本地图片文件试一下
-    /// Debug: try a local picture file
-    #[arg(long = "img")]
-    img: Option<String>,
-
-    /// 调试：那张图是哪种题（driftodd 或 coherence）
-    /// Debug: which kind of puzzle that picture is (driftodd or coherence)
-    #[arg(long = "img-type", default_value = "driftodd")]
-    img_type: String,
-
-    /// 调试：同一张图反复算几次，看耗时
-    /// Debug: work out the same picture several times, to see the timing
-    #[arg(long = "bench", default_value_t = 1)]
-    bench: usize,
-
-    /// 调试：只看预备池状况，不绕过
-    /// Debug: only watch the puzzle store, do not bypass
-    #[arg(long = "pool-stats")]
-    pool_stats: bool,
-
-    /// 调试：看多少秒
-    /// Debug: how many seconds to watch for
-    #[arg(long = "pool-watch-secs", default_value_t = 60)]
-    pool_watch_secs: u64,
 }
 
 fn main() {
@@ -121,129 +85,12 @@ fn main() {
 
     let options = Options::parse();
 
-    if options.pool_stats {
-        watch_pool(options.prepared, options.pool_watch_secs);
-        return;
-    }
-
-    if let Some(path) = &options.img {
-        try_picture(path, &options.img_type, options.bench);
-        return;
-    }
-
     if options.serve {
-        api::serve(&options.host, options.port, options.prepared);
+        api::serve(&options.host, options.port);
         return;
     }
 
     bypass_links(&options);
-}
-
-// ---------------------------------------------------------------------------
-// 调试：试一张本地图片 / Debug: try a local picture
-// ---------------------------------------------------------------------------
-
-/// 拿本地图片文件试一下，看认得对不对、多快。
-///
-/// 排查"是图片认错了还是网络出问题"的时候很有用 —— 这条路完全不联网。
-///
-/// Try a local picture file, to see whether it is read correctly and how fast.
-///
-/// Handy when working out whether a picture was misread or the network is at fault —
-/// this route does not touch the network at all.
-fn try_picture(path: &str, kind: &str, times: usize) {
-    let Ok(bytes) = std::fs::read(path) else {
-        eprintln!("无法读取文件 / Cannot read file: {}", path);
-        std::process::exit(1);
-    };
-
-    let started = Instant::now();
-    let (choice, method) = solver::solve(&bytes, kind);
-    let first_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    // 只算一次就直接报。
-    // Only asked for one, so just report it.
-    if times <= 1 {
-        match choice {
-            Some((x, y)) => println!("({:.2}, {:.2}) [{}] {:.1}ms", x, y, method, first_ms),
-            None => println!("识别未命中 / No match [{}] {:.1}ms", method, first_ms),
-        }
-        return;
-    }
-
-    // 多算几次看快慢。第一次通常偏慢（要预热），所以最快那次更有参考价值。
-    // Several times, to see the speed. The first is usually slower (warming up), so the
-    // fastest one is the more useful figure.
-    let mut all = Vec::with_capacity(times);
-    for _ in 0..times {
-        let one = Instant::now();
-        let _ = solver::solve(&bytes, kind);
-        all.push(one.elapsed().as_secs_f64() * 1000.0);
-    }
-
-    let fastest = all.iter().cloned().fold(f64::INFINITY, f64::min);
-    let average = all.iter().sum::<f64>() / all.len() as f64;
-
-    match choice {
-        Some((x, y)) => println!(
-            "({:.2}, {:.2}) [{}] 首次={:.1}ms 最快={:.1}ms 平均={:.1}ms 样本数={}",
-            x, y, method, first_ms, fastest, average, times
-        ),
-        None => println!(
-            "识别未命中 / No match [{}] 首次={:.1}ms 最快={:.1}ms 平均={:.1}ms 样本数={}",
-            method, first_ms, fastest, average, times
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 调试：看预备池 / Debug: watch the puzzle store
-// ---------------------------------------------------------------------------
-
-/// 单独跑预备池，看它填得怎么样、稳不稳。
-///
-/// 每秒打一行。想确认"存这么多会不会被限流"就看 `被拒` 那一栏，一直是 0 就没问题。
-///
-/// Run the puzzle store on its own, to see how it fills and how steady it holds.
-///
-/// One line per second. To check whether a given size gets rate-limited, watch the
-/// refused column — all zeros means it is fine.
-fn watch_pool(want: usize, seconds: u64) {
-    println!("[预备池] 目标容量={} 观测时长={}s / Target capacity {}, observing {}s", want, seconds, want, seconds);
-
-    net::warm_up_captcha();
-    pool::start(want, (*net::captcha_client()).clone());
-
-    let started = Instant::now();
-    let mut last_second = 0u64;
-
-    loop {
-        let elapsed = started.elapsed().as_secs();
-
-        if elapsed != last_second {
-            last_second = elapsed;
-            let s = pool::snapshot();
-
-            println!(
-                "  t={:>3}s 可用={:>2}/{} 最早={:>4.1}s 最新={:>4.1}s 已生成={} 已发放={} 已过期={} 被拒={} 退避={}ms",
-                elapsed,
-                s.usable,
-                s.want,
-                s.oldest_secs,
-                s.newest_secs,
-                s.made,
-                s.handed_out,
-                s.expired,
-                s.refused,
-                s.penalty_ms
-            );
-        }
-
-        if started.elapsed().as_secs() >= seconds {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,13 +103,9 @@ fn bypass_links(options: &Options) {
     let talk = !options.quiet;
     let overall_start = Instant::now();
 
-    // 一边开连接、一边备题，一边去要链接 —— 都不用等对方。
-    // Open connections and prepare puzzles while asking for links — none waits on the
-    // others.
+    // 一边开连接，一边去要链接 —— 不用等对方。
+    // Open connections while asking for links — neither waits on the other.
     let warming = std::thread::spawn(net::warm_up_all);
-    if options.prepared > 0 {
-        pool::start(options.prepared, (*net::captcha_client()).clone());
-    }
 
     // 先把要绕过的通行串凑齐。
     // Gather the pass strings to work through.
@@ -302,12 +145,6 @@ fn bypass_links(options: &Options) {
     }
 
     let _ = warming.join();
-
-    // 等一下预备池，让第一条也能用上现成的题。
-    // Give the store a moment, so even the first link gets a ready-made puzzle.
-    if options.prepared > 0 {
-        pool::wait_until_ready(Duration::from_secs(3));
-    }
 
     // ---- 一条一条绕 ----
     // ---- Work through them one at a time ----

@@ -48,6 +48,7 @@ use tokio::sync::watch;
 
 use crate::auth;
 use crate::chain;
+use crate::clientver;
 use crate::config;
 use crate::net;
 
@@ -487,6 +488,10 @@ pub fn serve(host: &str, port: u16) {
     // Open the connections first, so the very first request skips the handshake.
     std::thread::spawn(net::warm_up_all);
 
+    // 后台开始盯上游客户端版本。
+    // Start watching the far end's client version in the background.
+    clientver::start_background();
+
     let runtime = tokio::runtime::Runtime::new().expect("初始化运行时 / initialise the runtime");
 
     runtime.block_on(async move {
@@ -532,6 +537,7 @@ mod tests {
         assert_eq!(body["made_by"], config::MADE_BY);
         assert_eq!(body["qq_group"], config::QQ_GROUP);
         assert!(body["times"].as_str().unwrap().ends_with('s'));
+
     }
 
     #[test]

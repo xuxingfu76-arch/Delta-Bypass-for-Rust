@@ -189,6 +189,9 @@ The application incorporates two key architectural optimizations to minimize lat
 3. **Same-Link Request Merging**  
    Concurrent requests for one link trigger only a single real bypass; the rest share the same result.
 
+4. **Automatic Client-Version Tracking**  
+   The `x-client-version` header must match the far end's web client, or submissions are flatly refused (`outdated client`). At startup and then hourly, the service fetches the upstream single-page app script, extracts version candidates, and probes each one — updating automatically when the upstream ships a new release, with no code change or redeploy needed. On extraction failure it falls back to a built-in value.
+
 ---
 
 ## Production Deployment & Service Management

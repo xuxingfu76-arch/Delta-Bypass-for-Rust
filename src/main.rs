@@ -103,9 +103,11 @@ fn bypass_links(options: &Options) {
     let talk = !options.quiet;
     let overall_start = Instant::now();
 
-    // 一边开连接，一边去要链接 —— 不用等对方。
-    // Open connections while asking for links — neither waits on the other.
+    // 一边开连接、一边盯版本，一边去要链接 —— 不用等对方。
+    // Open connections, watch the client version, and ask for links — none waits on
+    // the others.
     let warming = std::thread::spawn(net::warm_up_all);
+    delta_bypass::clientver::start_background();
 
     // 先把要绕过的通行串凑齐。
     // Gather the pass strings to work through.

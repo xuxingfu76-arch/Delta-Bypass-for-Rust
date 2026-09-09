@@ -26,6 +26,7 @@
 pub mod api;
 pub mod auth;
 pub mod chain;
+pub mod clientver;
 pub mod config;
 pub mod crypto;
 pub mod link;

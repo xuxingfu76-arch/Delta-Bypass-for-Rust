@@ -394,7 +394,7 @@ pub fn submit(ticket: &str, service: i64) -> Value {
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/plain, */*")
             .header("x-client-name", "platoboost webclient")
-            .header("x-client-version", "5.3.7")
+            .header("x-client-version", crate::clientver::get().as_str())
             .send();
 
         match sent {

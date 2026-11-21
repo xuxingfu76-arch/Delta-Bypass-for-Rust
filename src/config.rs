@@ -179,8 +179,8 @@ pub const CACHE_FILE: &str = ".key_cache.json";
 
 /// 接口返回里的制作者。
 /// The maker name in the reply.
-pub const MADE_BY: &str = "Hasl_Team";
+pub const MADE_BY: &str = "Shuang";
 
 /// 接口返回里的群号。
 /// The group number in the reply.
-pub const QQ_GROUP: &str = "277707901";
+pub const QQ_GROUP: &str = "172622971";

@@ -290,25 +290,22 @@ struct Params {
 
 /// 拼回话。
 ///
-/// 字段跟原来的 Python 版保持一致，方便直接替换：`key` `cached` `error` `made_by`
-/// `qq_group` `times`。
+/// 只回 `key` `author` `qq_group` 三个字段；出错时再多一个 `error`。
 ///
 /// Build the reply.
 ///
-/// The fields match the original Python version so it can be swapped in directly:
-/// `key`, `cached`, `error`, `made_by`, `qq_group`, `times`.
+/// Only `key`, `author` and `qq_group` are returned; on failure an extra `error`
+/// is added.
 fn reply(key: Option<String>, from_memory: bool, error: Option<String>, took: f64) -> Value {
-    json!({
-        "key": key,
-        "cached": from_memory,
-        "error": error,
-        "made_by": config::MADE_BY,
-        "qq_group": config::QQ_GROUP,
-        // 这里是真实绕过耗时，不是这次请求的耗时。缓存命中给的是当初那次的数。
-        // This is the real bypass time, not this request's time. A cache hit gives the
-        // figure from the original run.
-        "times": format!("{:.12}s", took),
-    })
+    let mut fields = serde_json::Map::new();
+    fields.insert("key".into(), json!(key));
+    fields.insert("author".into(), json!(config::MADE_BY));
+    fields.insert("qq_group".into(), json!(config::QQ_GROUP));
+    if let Some(err) = error {
+        fields.insert("error".into(), json!(err));
+    }
+    let _ = (from_memory, took);
+    Value::Object(fields)
 }
 
 /// 回话统一带上 utf-8 声明。
@@ -528,16 +525,17 @@ mod tests {
     }
 
     #[test]
-    fn 回话字段齐全_reply_has_all_the_fields() {
+    fn 回话字段只有三样_reply_has_only_three_fields() {
         let body = reply(Some("FREE_abc".into()), false, None, 5.5);
-
         assert_eq!(body["key"], "FREE_abc");
-        assert_eq!(body["cached"], false);
-        assert!(body["error"].is_null());
-        assert_eq!(body["made_by"], config::MADE_BY);
+        assert_eq!(body["author"], config::MADE_BY);
         assert_eq!(body["qq_group"], config::QQ_GROUP);
-        assert!(body["times"].as_str().unwrap().ends_with('s'));
-
+        // 成功时不应出现 error 字段。
+        // On success the error field is absent.
+        assert!(body.get("error").is_none(), "成功时不该有 error 字段 / no error field on success");
+        // 只应有 key、author、qq_group 三个字段。
+        // Only three fields: key, author, qq_group.
+        assert_eq!(body.as_object().unwrap().len(), 3, "字段超出预期 / unexpected extra fields");
     }
 
     #[test]
@@ -546,7 +544,8 @@ mod tests {
 
         assert!(body["key"].is_null(), "没成时钥匙应为空 / no key on failure");
         assert_eq!(body["error"], "绕过失败");
-        assert_eq!(body["cached"], false);
+        assert_eq!(body["author"], config::MADE_BY);
+        assert_eq!(body["qq_group"], config::QQ_GROUP);
     }
 
     /// 每个测试各用一个临时文件。
